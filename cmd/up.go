@@ -30,6 +30,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/ide/marimo"
 	"github.com/loft-sh/devpod/pkg/ide/openvscode"
 	"github.com/loft-sh/devpod/pkg/ide/vscode"
+	"github.com/loft-sh/devpod/pkg/ide/zed"
 	open2 "github.com/loft-sh/devpod/pkg/open"
 	"github.com/loft-sh/devpod/pkg/platform"
 	"github.com/loft-sh/devpod/pkg/port"
@@ -243,6 +244,15 @@ func (cmd *UpCmd) Run(
 				vscode.FlavorCursor,
 				log,
 			)
+		case string(config.IDECodium):
+			return vscode.Open(
+				ctx,
+				client.Workspace(),
+				result.SubstitutionContext.ContainerWorkspaceFolder,
+				vscode.Options.GetValue(ideConfig.Options, vscode.OpenNewWindow) == "true",
+				vscode.FlavorCodium,
+				log,
+			)
 		case string(config.IDEPositron):
 			return vscode.Open(
 				ctx,
@@ -283,8 +293,12 @@ func (cmd *UpCmd) Run(
 			return jetbrains.NewRubyMineServer(config2.GetRemoteUser(result), ideConfig.Options, log).OpenGateway(result.SubstitutionContext.ContainerWorkspaceFolder, client.Workspace())
 		case string(config.IDEWebStorm):
 			return jetbrains.NewWebStormServer(config2.GetRemoteUser(result), ideConfig.Options, log).OpenGateway(result.SubstitutionContext.ContainerWorkspaceFolder, client.Workspace())
+		case string(config.IDEDataSpell):
+			return jetbrains.NewDataSpellServer(config2.GetRemoteUser(result), ideConfig.Options, log).OpenGateway(result.SubstitutionContext.ContainerWorkspaceFolder, client.Workspace())
 		case string(config.IDEFleet):
 			return startFleet(ctx, client, log)
+		case string(config.IDEZed):
+			return zed.Open(ctx, ideConfig.Options, config2.GetRemoteUser(result), result.SubstitutionContext.ContainerWorkspaceFolder, client.Workspace(), log)
 		case string(config.IDEJupyterNotebook):
 			return startJupyterNotebookInBrowser(
 				cmd.GPGAgentForwarding,
@@ -1216,7 +1230,7 @@ func checkProviderUpdate(devPodConfig *config.Config, proInstance *provider2.Pro
 	if v1.Compare(v2) == 0 {
 		return nil
 	}
-	log.Infof("New provider version available, attempting to update %s", proInstance.Provider)
+	log.Infof("New provider version available, attempting to update %s from %s to %s", proInstance.Provider, p.Config.Version, newVersion)
 
 	providerSource, err := workspace2.ResolveProviderSource(devPodConfig, proInstance.Provider, log)
 	if err != nil {
