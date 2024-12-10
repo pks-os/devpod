@@ -13,13 +13,22 @@ for os in $BUILD_PLATFORMS; do
             continue
         fi
         echo "[INFO] Building for $os/$arch"
-        CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags "-s -w" -o test/devpod-cli-$os-$arch
+        if [[ $RACE == "yes" ]]; then
+            echo "Building devpod with race detector"
+            CGO_ENABLED=1 GOOS=$os GOARCH=$arch go build -race -ldflags "-s -w" -o test/devpod-cli-$os-$arch
+        else
+            CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags "-s -w" -o test/devpod-cli-$os-$arch
+        fi
     done
 done
 
 echo "[INFO] Built binaries for all platforms in test/ directory"
 if [[ -z "${SKIP_INSTALL}" ]]; then
-    go build -o test/devpod && sudo mv test/devpod /usr/local/bin/
+    if command -v sudo &> /dev/null; then
+        go build -o test/devpod && sudo mv test/devpod /usr/local/bin/
+    else 
+        go install .
+    fi
 fi
 
 echo "[INFO] Built devpod binary and moved to /usr/local/bin"
