@@ -30,7 +30,7 @@ func NewOptionsCmd(flags *flags.GlobalFlags) *cobra.Command {
 		GlobalFlags: flags,
 	}
 	optionsCmd := &cobra.Command{
-		Use:   "options",
+		Use:   "options [provider]",
 		Short: "Show options of an existing provider",
 		RunE: func(_ *cobra.Command, args []string) error {
 			return cmd.Run(context.Background(), args)
@@ -61,6 +61,14 @@ func (cmd *OptionsCmd) Run(ctx context.Context, args []string) error {
 		providerName = args[0]
 	} else if providerName == "" {
 		return fmt.Errorf("please specify a provider")
+	}
+
+	if providerName != "" && cmd.GlobalFlags.Provider != "" {
+		if providerName != cmd.GlobalFlags.Provider {
+			log.Default.Infof("providerName=%+v", providerName)
+			log.Default.Infof("GlobalFlags.Provider=%+v", cmd.GlobalFlags.Provider)
+			return fmt.Errorf("ambiguous provider configuration detected")
+		}
 	}
 
 	providerWithOptions, err := workspace.FindProvider(devPodConfig, providerName, log.Default.ErrorStreamOnly())
@@ -132,7 +140,7 @@ func printOptions(devPodConfig *config.Config, provider *workspace.ProviderWithO
 	return nil
 }
 
-// mergeOptions merges the static provider options and dynamic options
+// MergeDynamicOptions merges the static provider options and dynamic options
 func MergeDynamicOptions(options map[string]*types.Option, dynamicOptions config.OptionDefinitions) map[string]*types.Option {
 	retOptions := map[string]*types.Option{}
 	for k, option := range options {
