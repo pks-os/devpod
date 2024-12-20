@@ -20,7 +20,6 @@ import (
 	"github.com/loft-sh/devpod/pkg/client/clientimplementation"
 	"github.com/loft-sh/devpod/pkg/command"
 	"github.com/loft-sh/devpod/pkg/config"
-	"github.com/loft-sh/devpod/pkg/credentials"
 	config2 "github.com/loft-sh/devpod/pkg/devcontainer/config"
 	"github.com/loft-sh/devpod/pkg/devcontainer/sshtunnel"
 	dpFlags "github.com/loft-sh/devpod/pkg/flags"
@@ -117,6 +116,7 @@ func NewUpCmd(f *flags.GlobalFlags) *cobra.Command {
 	upCmd.Flags().StringVar(&cmd.IDE, "ide", "", "The IDE to open the workspace in. If empty will use vscode locally or in browser")
 	upCmd.Flags().BoolVar(&cmd.OpenIDE, "open-ide", true, "If this is false and an IDE is configured, DevPod will only install the IDE server backend, but not open it")
 	upCmd.Flags().Var(&cmd.GitCloneStrategy, "git-clone-strategy", "The git clone strategy DevPod uses to checkout git based workspaces. Can be full (default), blobless, treeless or shallow")
+	upCmd.Flags().BoolVar(&cmd.GitCloneRecursiveSubmodules, "git-clone-recursive-submodules", false, "If true will clone git submodule repositories recursively")
 	upCmd.Flags().StringVar(&cmd.GitSSHSigningKey, "git-ssh-signing-key", "", "The ssh key to use when signing git commits. Used to explicitly setup DevPod's ssh signature forwarding with given key. Should be same format as value of `git config user.signingkey`")
 	upCmd.Flags().StringVar(&cmd.FallbackImage, "fallback-image", "", "The fallback image to use if no devcontainer configuration has been detected")
 
@@ -194,15 +194,6 @@ func (cmd *UpCmd) Run(
 	// setup git ssh signature
 	if cmd.GitSSHSigningKey != "" {
 		err = setupGitSSHSignature(cmd.GitSSHSigningKey, client, log)
-		if err != nil {
-			return err
-		}
-	}
-
-	// setup loft platform access
-	context := devPodConfig.Current()
-	if cmd.SetupLoftPlatformAccess {
-		err = setupLoftPlatformAccess(devPodConfig.DefaultContext, context.DefaultProvider, user, client, log)
 		if err != nil {
 			return err
 		}
@@ -896,6 +887,7 @@ func startBrowserTunnel(
 				extraPorts,
 				gitUsername,
 				gitToken,
+				client.WorkspaceConfig(),
 				logger,
 			)
 			if err != nil {
@@ -1112,42 +1104,6 @@ func setupGitSSHSignature(signingKey string, client client2.BaseWorkspaceClient,
 	if err != nil {
 		log.Error("failure in setting up git ssh signature helper")
 	}
-	return nil
-}
-
-func setupLoftPlatformAccess(context, provider, user string, client client2.BaseWorkspaceClient, log log.Logger) error {
-	log.Infof("Setting up platform access")
-	execPath, err := os.Executable()
-	if err != nil {
-		return err
-	}
-
-	port, err := credentials.GetPort()
-	if err != nil {
-		return fmt.Errorf("get port: %w", err)
-	}
-
-	command := fmt.Sprintf("\"%s\" agent container setup-loft-platform-access --context %s --provider %s --port %d", agent.ContainerDevPodHelperLocation, context, provider, port)
-
-	log.Debugf("Executing command: %v", command)
-	var errb bytes.Buffer
-	cmd := exec.Command(
-		execPath,
-		"ssh",
-		"--start-services=true",
-		"--user",
-		user,
-		"--context",
-		client.Context(),
-		client.Workspace(),
-		"--command", command,
-	)
-	cmd.Stderr = &errb
-	err = cmd.Run()
-	if err != nil {
-		log.Debugf("failed to set up platform access in workspace: %s", errb.String())
-	}
-
 	return nil
 }
 

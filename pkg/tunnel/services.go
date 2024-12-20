@@ -3,6 +3,7 @@ package tunnel
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -20,6 +21,7 @@ import (
 	"github.com/loft-sh/devpod/pkg/gitsshsigning"
 	"github.com/loft-sh/devpod/pkg/ide/openvscode"
 	"github.com/loft-sh/devpod/pkg/netstat"
+	"github.com/loft-sh/devpod/pkg/provider"
 	devssh "github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/log"
 	"github.com/pkg/errors"
@@ -38,6 +40,7 @@ func RunInContainer(
 	extraPorts []string,
 	gitUsername,
 	gitToken string,
+	workspace *provider.Workspace,
 	log log.Logger,
 ) error {
 	// calculate exit after timeout
@@ -98,6 +101,7 @@ func RunInContainer(
 				configureGitCredentials,
 				configureDockerCredentials,
 				forwarder,
+				workspace,
 				log,
 				tunnelserver.WithGitCredentialsOverride(gitUsername, gitToken),
 			)
@@ -118,7 +122,8 @@ func RunInContainer(
 		if configureGitSSHSignatureHelper {
 			format, userSigningKey, err := gitsshsigning.ExtractGitConfiguration()
 			if err == nil && format == gitsshsigning.GPGFormatSSH && userSigningKey != "" {
-				command += fmt.Sprintf(" --git-user-signing-key %s", userSigningKey)
+				encodedKey := base64.StdEncoding.EncodeToString([]byte(userSigningKey))
+				command += fmt.Sprintf(" --git-user-signing-key %s", encodedKey)
 			}
 		}
 		if configureDockerCredentials {
