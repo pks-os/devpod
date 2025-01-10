@@ -33,6 +33,11 @@ var UIEventsExceptions []string = []string{
 	"devpod pro list",
 	"devpod pro check-health",
 	"devpod pro check-update",
+	"devpod ide list",
+	"devpod ide use",
+	"devpod provider use",
+	"devpod version",
+	"devpod context options",
 }
 
 // skip everything in pro mode
@@ -49,7 +54,8 @@ type CLICollector interface {
 // StartCLI starts collecting events and sending them to the backend from the CLI
 func StartCLI(devPodConfig *config.Config, cmd *cobra.Command) {
 	telemetryOpt := devPodConfig.ContextOption(config.ContextOptionTelemetry)
-	if telemetryOpt == "false" || version.GetVersion() == version.DevVersion {
+	if telemetryOpt == "false" || version.GetVersion() == version.DevVersion ||
+		os.Getenv("DEVPOD_DISABLE_TELEMETRY") == "true" {
 		return
 	}
 

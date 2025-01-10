@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -23,6 +24,7 @@ import (
 	config2 "github.com/loft-sh/devpod/pkg/devcontainer/config"
 	"github.com/loft-sh/devpod/pkg/devcontainer/sshtunnel"
 	dpFlags "github.com/loft-sh/devpod/pkg/flags"
+	"github.com/loft-sh/devpod/pkg/ide"
 	"github.com/loft-sh/devpod/pkg/ide/fleet"
 	"github.com/loft-sh/devpod/pkg/ide/jetbrains"
 	"github.com/loft-sh/devpod/pkg/ide/jupyter"
@@ -37,6 +39,7 @@ import (
 	devssh "github.com/loft-sh/devpod/pkg/ssh"
 	"github.com/loft-sh/devpod/pkg/telemetry"
 	"github.com/loft-sh/devpod/pkg/tunnel"
+	"github.com/loft-sh/devpod/pkg/util"
 	"github.com/loft-sh/devpod/pkg/version"
 	workspace2 "github.com/loft-sh/devpod/pkg/workspace"
 	"github.com/loft-sh/log"
@@ -64,8 +67,10 @@ type UpCmd struct {
 
 	SSHConfigPath string
 
-	DotfilesSource string
-	DotfilesScript string
+	DotfilesSource        string
+	DotfilesScript        string
+	DotfilesScriptEnv     []string // Key=Value to pass to install script
+	DotfilesScriptEnvFile []string // Paths to files containing Key=Value pairs to pass to install script
 }
 
 // NewUpCmd creates a new up command
@@ -98,6 +103,8 @@ func NewUpCmd(f *flags.GlobalFlags) *cobra.Command {
 	upCmd.Flags().StringVar(&cmd.SSHConfigPath, "ssh-config", "", "The path to the ssh config to modify, if empty will use ~/.ssh/config")
 	upCmd.Flags().StringVar(&cmd.DotfilesSource, "dotfiles", "", "The path or url to the dotfiles to use in the container")
 	upCmd.Flags().StringVar(&cmd.DotfilesScript, "dotfiles-script", "", "The path in dotfiles directory to use to install the dotfiles, if empty will try to guess")
+	upCmd.Flags().StringSliceVar(&cmd.DotfilesScriptEnv, "dotfiles-script-env", []string{}, "Extra environment variables to put into the dotfiles install script. E.g. MY_ENV_VAR=MY_VALUE")
+	upCmd.Flags().StringSliceVar(&cmd.DotfilesScriptEnvFile, "dotfiles-script-env-file", []string{}, "The path to files containing environment variables to set for the dotfiles install script")
 	upCmd.Flags().StringArrayVar(&cmd.IDEOptions, "ide-option", []string{}, "IDE option in the form KEY=VALUE")
 	upCmd.Flags().StringVar(&cmd.DevContainerImage, "devcontainer-image", "", "The container image to use, this will override the devcontainer.json value in the project")
 	upCmd.Flags().StringVar(&cmd.DevContainerPath, "devcontainer-path", "", "The path to the devcontainer.json relative to the project")
@@ -153,6 +160,19 @@ func (cmd *UpCmd) Run(
 		cmd.Recreate = true
 	}
 
+	// check if we are a browser IDE and need to reuse the SSH_AUTH_SOCK
+	targetIDE := client.WorkspaceConfig().IDE.Name
+	// Check override
+	if cmd.IDE != "" {
+		targetIDE = cmd.IDE
+	}
+	if !cmd.Proxy && ide.ReusesAuthSock(targetIDE) {
+		cmd.SSHAuthSockID = util.RandStringBytes(10)
+		log.Debug("Reusing SSH_AUTH_SOCK", cmd.SSHAuthSockID)
+	} else if cmd.Proxy && ide.ReusesAuthSock(targetIDE) {
+		log.Debug("Reusing SSH_AUTH_SOCK is not supported with proxy mode, consider launching the IDE from the platform UI")
+	}
+
 	// run devpod agent up
 	result, err := cmd.devPodUp(ctx, devPodConfig, client, log)
 	if err != nil {
@@ -202,7 +222,7 @@ func (cmd *UpCmd) Run(
 	}
 
 	// setup dotfiles in the container
-	err = setupDotfiles(cmd.DotfilesSource, cmd.DotfilesScript, client, devPodConfig, log)
+	err = setupDotfiles(cmd.DotfilesSource, cmd.DotfilesScript, cmd.DotfilesScriptEnvFile, cmd.DotfilesScriptEnv, client, devPodConfig, log)
 	if err != nil {
 		return err
 	}
@@ -267,6 +287,7 @@ func (cmd *UpCmd) Run(
 				ideConfig.Options,
 				cmd.GitUsername,
 				cmd.GitToken,
+				cmd.SSHAuthSockID,
 				log,
 			)
 		case string(config.IDERustRover):
@@ -303,6 +324,7 @@ func (cmd *UpCmd) Run(
 				ideConfig.Options,
 				cmd.GitUsername,
 				cmd.GitToken,
+				cmd.SSHAuthSockID,
 				log,
 			)
 		case string(config.IDEJupyterDesktop):
@@ -315,6 +337,7 @@ func (cmd *UpCmd) Run(
 				ideConfig.Options,
 				cmd.GitUsername,
 				cmd.GitToken,
+				cmd.SSHAuthSockID,
 				log)
 		case string(config.IDEMarimo):
 			return startMarimoInBrowser(
@@ -326,6 +349,7 @@ func (cmd *UpCmd) Run(
 				ideConfig.Options,
 				cmd.GitUsername,
 				cmd.GitToken,
+				cmd.SSHAuthSockID,
 				log)
 		}
 	}
@@ -552,7 +576,7 @@ func startMarimoInBrowser(
 	client client2.BaseWorkspaceClient,
 	user string,
 	ideOptions map[string]config.OptionValue,
-	gitUsername, gitToken string,
+	gitUsername, gitToken, authSockID string,
 	logger log.Logger,
 ) error {
 	if forwardGpg {
@@ -599,6 +623,7 @@ func startMarimoInBrowser(
 		extraPorts,
 		gitUsername,
 		gitToken,
+		authSockID,
 		logger,
 	)
 }
@@ -610,7 +635,7 @@ func startJupyterNotebookInBrowser(
 	client client2.BaseWorkspaceClient,
 	user string,
 	ideOptions map[string]config.OptionValue,
-	gitUsername, gitToken string,
+	gitUsername, gitToken, authSockID string,
 	logger log.Logger,
 ) error {
 	if forwardGpg {
@@ -657,6 +682,7 @@ func startJupyterNotebookInBrowser(
 		extraPorts,
 		gitUsername,
 		gitToken,
+		authSockID,
 		logger,
 	)
 }
@@ -668,7 +694,7 @@ func startJupyterDesktop(
 	client client2.BaseWorkspaceClient,
 	user string,
 	ideOptions map[string]config.OptionValue,
-	gitUsername, gitToken string,
+	gitUsername, gitToken, authSockID string,
 	logger log.Logger,
 ) error {
 	if forwardGpg {
@@ -712,6 +738,7 @@ func startJupyterDesktop(
 		extraPorts,
 		gitUsername,
 		gitToken,
+		authSockID,
 		logger,
 	)
 }
@@ -758,7 +785,7 @@ func startVSCodeInBrowser(
 	client client2.BaseWorkspaceClient,
 	workspaceFolder, user string,
 	ideOptions map[string]config.OptionValue,
-	gitUsername, gitToken string,
+	gitUsername, gitToken, authSockID string,
 	logger log.Logger,
 ) error {
 	if forwardGpg {
@@ -806,6 +833,7 @@ func startVSCodeInBrowser(
 		extraPorts,
 		gitUsername,
 		gitToken,
+		authSockID,
 		logger,
 	)
 }
@@ -841,6 +869,55 @@ func parseAddressAndPort(bindAddressOption string, defaultPort int) (string, int
 	return address, portName, nil
 }
 
+// setupBackhaul sets up a long running command in the container to ensure an SSH connection is kept alive
+func setupBackhaul(client client2.BaseWorkspaceClient, authSockId string, log log.Logger) error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	remoteUser, err := devssh.GetUser(client.WorkspaceConfig().ID, client.WorkspaceConfig().SSHConfigPath)
+	if err != nil {
+		remoteUser = "root"
+	}
+
+	dotCmd := exec.Command(
+		execPath,
+		"ssh",
+		"--agent-forwarding=true",
+		fmt.Sprintf("--reuse-ssh-auth-sock=%s", authSockId),
+		"--start-services=false",
+		"--user",
+		remoteUser,
+		"--context",
+		client.Context(),
+		client.Workspace(),
+		"--log-output=raw",
+		"--command",
+		"while true; do sleep 6000000; done", // sleep infinity is not available on all systems
+	)
+
+	if log.GetLevel() == logrus.DebugLevel {
+		dotCmd.Args = append(dotCmd.Args, "--debug")
+	}
+
+	log.Info("Setting up backhaul SSH connection")
+
+	writer := log.Writer(logrus.InfoLevel, false)
+
+	dotCmd.Stdout = writer
+	dotCmd.Stderr = writer
+
+	err = dotCmd.Run()
+	if err != nil {
+		return err
+	}
+
+	log.Infof("Done setting up backhaul")
+
+	return nil
+}
+
 func startBrowserTunnel(
 	ctx context.Context,
 	devPodConfig *config.Config,
@@ -848,9 +925,19 @@ func startBrowserTunnel(
 	user, targetURL string,
 	forwardPorts bool,
 	extraPorts []string,
-	gitUsername, gitToken string,
+	gitUsername, gitToken, authSockID string,
 	logger log.Logger,
 ) error {
+	// Setup a backhaul SSH connection using the remote user so there is an AUTH SOCK to use
+	// With normal IDEs this would be the SSH connection made by the IDE
+	// authSockID is not set when in proxy mode since we cannot use the proxies ssh-agent
+	if authSockID != "" {
+		go func() {
+			if err := setupBackhaul(client, authSockID, logger); err != nil {
+				logger.Error("Failed to setup backhaul SSH connection: ", err)
+			}
+		}()
+	}
 	err := tunnel.NewTunnel(
 		ctx,
 		func(ctx context.Context, stdin io.Reader, stdout io.Writer) error {
@@ -859,6 +946,7 @@ func startBrowserTunnel(
 
 			cmd, err := createSSHCommand(ctx, client, logger, []string{
 				"--log-output=raw",
+				fmt.Sprintf("--reuse-ssh-auth-sock=%s", authSockID),
 				"--stdio",
 			})
 			if err != nil {
@@ -880,7 +968,7 @@ func startBrowserTunnel(
 			}
 
 			// run in container
-			err := tunnel.RunInContainer(
+			err := tunnel.RunServices(
 				ctx,
 				devPodConfig,
 				containerClient,
@@ -993,6 +1081,7 @@ func createSSHCommand(
 
 func setupDotfiles(
 	dotfiles, script string,
+	envFiles, envKeyValuePairs []string,
 	client client2.BaseWorkspaceClient,
 	devPodConfig *config.Config,
 	log log.Logger,
@@ -1015,55 +1104,15 @@ func setupDotfiles(
 	log.Infof("Dotfiles git repository %s specified", dotfilesRepo)
 	log.Debug("Cloning dotfiles into the devcontainer...")
 
-	execPath, err := os.Executable()
+	dotCmd, err := buildDotCmd(dotfilesRepo, dotfilesScript, envFiles, envKeyValuePairs, devPodConfig, client, log)
 	if err != nil {
 		return err
 	}
-
-	agentArguments := []string{
-		"agent",
-		"workspace",
-		"install-dotfiles",
-		"--repository",
-		dotfilesRepo,
-	}
-
-	if log.GetLevel() == logrus.DebugLevel {
-		agentArguments = append(agentArguments, "--debug")
-	}
-
-	if dotfilesScript != "" {
-		log.Infof("Dotfiles script %s specified", dotfilesScript)
-
-		agentArguments = append(agentArguments, "--install-script")
-		agentArguments = append(agentArguments, dotfilesScript)
-	}
-
-	remoteUser, err := devssh.GetUser(client.WorkspaceConfig().ID, client.WorkspaceConfig().SSHConfigPath)
-	if err != nil {
-		remoteUser = "root"
-	}
-
-	dotCmd := exec.Command(
-		execPath,
-		"ssh",
-		"--agent-forwarding=true",
-		"--start-services=true",
-		"--user",
-		remoteUser,
-		"--context",
-		client.Context(),
-		client.Workspace(),
-		"--log-output=raw",
-		"--command",
-		agent.ContainerDevPodHelperLocation+" "+strings.Join(agentArguments, " "),
-	)
-
 	if log.GetLevel() == logrus.DebugLevel {
 		dotCmd.Args = append(dotCmd.Args, "--debug")
 	}
 
-	log.Debugf("Running command: %v", dotCmd.Args)
+	log.Debugf("Running dotfiles setup command: %v", dotCmd.Args)
 
 	writer := log.Writer(logrus.InfoLevel, false)
 
@@ -1078,6 +1127,100 @@ func setupDotfiles(
 	log.Infof("Done setting up dotfiles into the devcontainer")
 
 	return nil
+}
+
+func buildDotCmdAgentArguments(dotfilesRepo, dotfilesScript string, log log.Logger) []string {
+	agentArguments := []string{
+		"agent",
+		"workspace",
+		"install-dotfiles",
+		"--repository",
+		dotfilesRepo,
+	}
+
+	if log.GetLevel() == logrus.DebugLevel {
+		agentArguments = append(agentArguments, "--debug")
+	}
+
+	if dotfilesScript != "" {
+		log.Infof("Dotfiles script %s specified", dotfilesScript)
+		agentArguments = append(agentArguments, "--install-script", dotfilesScript)
+	}
+
+	return agentArguments
+}
+
+func buildDotCmd(dotfilesRepo, dotfilesScript string, envFiles, envKeyValuePairs []string, devPodConfig *config.Config, client client2.BaseWorkspaceClient, log log.Logger) (*exec.Cmd, error) {
+	sshCmd := []string{
+		"ssh",
+		"--agent-forwarding=true",
+		"--start-services=true",
+	}
+
+	envFilesKeyValuePairs, err := collectDotfilesScriptEnvKeyvaluePairs(envFiles)
+	if err != nil {
+		return nil, err
+	}
+
+	// Collect file-based and CLI options env variables names (aka keys) and
+	// configure ssh env var passthrough with send-env
+	allEnvKeyValuesPairs := slices.Concat(envFilesKeyValuePairs, envKeyValuePairs)
+	allEnvKeys := extractKeysFromEnvKeyValuePairs(allEnvKeyValuesPairs)
+	for _, envKey := range allEnvKeys {
+		sshCmd = append(sshCmd, "--send-env", envKey)
+	}
+
+	remoteUser, err := devssh.GetUser(client.WorkspaceConfig().ID, client.WorkspaceConfig().SSHConfigPath)
+	if err != nil {
+		remoteUser = "root"
+	}
+
+	agentArguments := buildDotCmdAgentArguments(dotfilesRepo, dotfilesScript, log)
+	sshCmd = append(sshCmd,
+		"--user",
+		remoteUser,
+		"--context",
+		client.Context(),
+		client.Workspace(),
+		"--log-output=raw",
+		"--command",
+		agent.ContainerDevPodHelperLocation+" "+strings.Join(agentArguments, " "),
+	)
+	execPath, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+
+	dotCmd := exec.Command(
+		execPath,
+		sshCmd...,
+	)
+
+	dotCmd.Env = append(dotCmd.Environ(), allEnvKeyValuesPairs...)
+	return dotCmd, nil
+}
+
+func extractKeysFromEnvKeyValuePairs(envKeyValuePairs []string) []string {
+	keys := []string{}
+	for _, env := range envKeyValuePairs {
+		keyValue := strings.SplitN(env, "=", 2)
+		if len(keyValue) == 2 {
+			keys = append(keys, keyValue[0])
+		}
+	}
+	return keys
+}
+
+func collectDotfilesScriptEnvKeyvaluePairs(envFiles []string) ([]string, error) {
+	keyValues := []string{}
+	for _, file := range envFiles {
+		envFromFile, err := config2.ParseKeyValueFile(file)
+		if err != nil {
+			return nil, err
+		}
+		keyValues = append(keyValues, envFromFile...)
+	}
+	return keyValues, nil
 }
 
 func setupGitSSHSignature(signingKey string, client client2.BaseWorkspaceClient, log log.Logger) error {
